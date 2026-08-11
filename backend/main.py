@@ -1,36 +1,30 @@
-import json
 import os
+import json
+import re
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from google import genai
 
-
-# ---------------------------------------------------------
-# ENV
-# ---------------------------------------------------------
 
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not GEMINI_API_KEY:
-    raise RuntimeError(
-        "GEMINI_API_KEY was not found in backend/.env"
-    )
+    raise RuntimeError("GEMINI_API_KEY is missing.")
 
-
-# ---------------------------------------------------------
-# APP
-# ---------------------------------------------------------
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 app = FastAPI(
     title="ResumeAI Backend",
-    version="3.0"
+    version="1.0.0",
 )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,24 +37,7 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------
-# MODELS
-# ---------------------------------------------------------
-
-semantic_model = SentenceTransformer(
-    "sentence-transformers/all-MiniLM-L6-v2"
-)
-
-gemini_client = genai.Client(
-    api_key=GEMINI_API_KEY
-)
-
-
-# ---------------------------------------------------------
-# REQUEST MODELS
-# ---------------------------------------------------------
-
-class SemanticRequest(BaseModel):
+class SemanticMatchRequest(BaseModel):
     resume_text: str
     job_description: str
 
@@ -72,149 +49,161 @@ class TailorResumeRequest(BaseModel):
     company_name: str | None = None
 
 
-# ---------------------------------------------------------
-# ROOT
-# ---------------------------------------------------------
+def clean_text(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"[^\w\s+#.-]", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 
 @app.get("/")
 def root():
     return {
+        "status": "ok",
         "message": "ResumeAI backend is running",
-        "semantic_matching": True,
-        "resume_tailoring": True,
     }
 
 
-# ---------------------------------------------------------
-# SEMANTIC MATCH
-# ---------------------------------------------------------
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy",
+    }
+
 
 @app.post("/semantic-match")
-def semantic_match(request: SemanticRequest):
+def semantic_match(request: SemanticMatchRequest):
+    try:
+        resume_text = clean_text(request.resume_text)
+        job_description = clean_text(request.job_description)
 
-    texts = [
-        request.resume_text,
-        request.job_description,
-    ]
+        if not resume_text:
+            raise HTTPException(
+                status_code=400,
+                detail="Resume text is required.",
+            )
 
-    embeddings = semantic_model.encode(texts)
+        if not job_description:
+            raise HTTPException(
+                status_code=400,
+                detail="Job description is required.",
+            )
 
-    similarity_matrix = semantic_model.similarity(
-        embeddings,
-        embeddings,
-    )
+        vectorizer = TfidfVectorizer(
+            stop_words="english",
+            ngram_range=(1, 2),
+            max_features=5000,
+        )
 
-    similarity = float(
-        similarity_matrix[0][1]
-    )
+        vectors = vectorizer.fit_transform(
+            [
+                resume_text,
+                job_description,
+            ]
+        )
 
-    similarity = max(
-        0.0,
-        min(similarity, 1.0)
-    )
+        similarity = cosine_similarity(
+            vectors[0:1],
+            vectors[1:2],
+        )[0][0]
 
-    score = round(
-        similarity * 100
-    )
+        score = round(float(similarity) * 100)
 
-    if score >= 80:
-        level = "Strong semantic match"
+        score = max(0, min(score, 100))
 
-    elif score >= 65:
-        level = "Good semantic match"
+        if score >= 75:
+            level = "Strong Match"
+        elif score >= 50:
+            level = "Good Match"
+        elif score >= 30:
+            level = "Moderate Match"
+        else:
+            level = "Low Match"
 
-    elif score >= 50:
-        level = "Moderate semantic match"
+        return {
+            "similarity": round(float(similarity), 4),
+            "semantic_score": score,
+            "level": level,
+            "method": "TF-IDF cosine similarity",
+        }
 
-    else:
-        level = "Low semantic match"
+    except HTTPException:
+        raise
 
-    return {
-        "semantic_score": score,
-        "similarity": round(
-            similarity,
-            4
-        ),
-        "level": level,
-    }
+    except ValueError:
+        return {
+            "similarity": 0,
+            "semantic_score": 0,
+            "level": "Low Match",
+            "method": "TF-IDF cosine similarity",
+        }
 
+    except Exception as exc:
+        print("Semantic match error:", exc)
 
-# ---------------------------------------------------------
-# RESUME TAILORING
-# ---------------------------------------------------------
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to calculate semantic match.",
+        )
+
 
 @app.post("/tailor-resume")
-def tailor_resume(
-    request: TailorResumeRequest
-):
+def tailor_resume(request: TailorResumeRequest):
     try:
+        if not request.job_description.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Job description is required.",
+            )
 
-        resume_json = json.dumps(
-            request.resume,
-            indent=2,
-            ensure_ascii=False
-        )
-
-        job_title = (
-            request.job_title
-            or "Not provided"
-        )
-
-        company_name = (
-            request.company_name
-            or "Not provided"
-        )
+        resume = request.resume
 
         prompt = f"""
-You are an expert ATS resume editor.
+You are an expert resume tailoring assistant.
 
-Your task is to tailor an existing resume toward a specific job
-description while preserving complete factual accuracy.
+Your job is to improve an existing resume for a specific job description.
 
-STRICT RULES:
+CRITICAL TRUTHFULNESS RULES:
 
-1. NEVER invent employment history.
-2. NEVER invent companies.
-3. NEVER invent job titles.
-4. NEVER invent education.
-5. NEVER invent degrees.
-6. NEVER invent certifications.
-7. NEVER invent projects.
-8. NEVER invent technologies or skills.
-9. NEVER invent numbers, percentages, metrics, achievements,
-   revenue figures, user counts or performance improvements.
-10. NEVER claim the candidate knows a skill unless that skill or
-    closely related evidence already exists in the supplied resume.
-11. Do not change names, dates, employers, colleges or factual
-    identifiers.
-12. Improve wording, clarity, ATS alignment and relevance only.
-13. Use strong action-oriented language where justified by the
-    original resume.
-14. If the job description requests a skill that is not supported
-    by the resume, put it inside "missing_skill_suggestions".
-15. Do NOT insert unsupported missing skills into the tailored
-    resume.
+1. Do NOT invent employment history.
+2. Do NOT invent company names.
+3. Do NOT invent job titles.
+4. Do NOT invent education.
+5. Do NOT invent degrees.
+6. Do NOT invent certifications.
+7. Do NOT invent projects.
+8. Do NOT invent technologies or tools the candidate has never used.
+9. Do NOT invent skills.
+10. Do NOT invent numbers, percentages, revenue, impact metrics, team sizes,
+    performance gains, customer counts, or achievements.
+11. Do NOT claim the candidate has experience they do not have.
+12. Missing job requirements must only appear under
+    "missing_skill_suggestions".
+13. You may rewrite existing experience and project descriptions to improve
+    clarity, ATS wording, action verbs, and relevance.
+14. Preserve all factual dates, employers, roles, project names, and technologies.
+15. Keep the output concise and professional.
 
-TARGET JOB TITLE:
-{job_title}
+JOB TITLE:
+{request.job_title or "Not provided"}
 
-TARGET COMPANY:
-{company_name}
+COMPANY:
+{request.company_name or "Not provided"}
 
 JOB DESCRIPTION:
 {request.job_description}
 
-ORIGINAL RESUME:
-{resume_json}
-
+CURRENT RESUME JSON:
+{json.dumps(resume, ensure_ascii=False)}
 
 Return ONLY valid JSON.
 
-Use exactly this structure:
+Do not use markdown fences.
+
+Return exactly this structure:
 
 {{
   "tailored_summary": "string",
-
   "tailored_experience": [
     {{
       "company": "string",
@@ -224,7 +213,6 @@ Use exactly this structure:
       "description": "string"
     }}
   ],
-
   "tailored_projects": [
     {{
       "name": "string",
@@ -232,86 +220,82 @@ Use exactly this structure:
       "technologies": "string"
     }}
   ],
-
   "recommended_existing_skills": [
     "string"
   ],
-
   "missing_skill_suggestions": [
     "string"
   ],
-
   "improvement_notes": [
     "string"
   ]
 }}
-
-Important:
-
-- Preserve factual content from the original resume.
-- Rewrite only what can truthfully be supported.
-- "recommended_existing_skills" must contain only skills that
-  already exist or are clearly demonstrated in the resume.
-- "missing_skill_suggestions" may contain job requirements not
-  demonstrated in the resume.
-- Output JSON only.
 """
 
-        response = (
-            gemini_client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=prompt,
-            )
+        response = gemini_client.models.generate_content(
+            model="gemini-3.6-flash",
+            contents=prompt,
         )
 
-        if not response.text:
+        raw_text = response.text
+
+        if not raw_text:
             raise HTTPException(
                 status_code=500,
-                detail="Gemini returned an empty response."
+                detail="Gemini returned an empty response.",
             )
 
-        raw_text = response.text.strip()
+        cleaned = raw_text.strip()
 
-        # Sometimes an LLM may wrap JSON in markdown fences.
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
 
-        elif raw_text.startswith("```"):
-            raw_text = raw_text[3:]
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:]
 
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
 
-        raw_text = raw_text.strip()
+        cleaned = cleaned.strip()
 
         try:
-            tailored_data = json.loads(
-                raw_text
-            )
+            result = json.loads(cleaned)
 
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            print("Gemini raw response:")
+            print(raw_text)
+            print("JSON error:", exc)
+
             raise HTTPException(
                 status_code=500,
-                detail=(
-                    "Gemini response was not valid JSON."
-                )
+                detail="Gemini returned invalid JSON.",
             )
 
-        return {
-            "success": True,
-            "tailored_resume": tailored_data,
-        }
+        required_keys = [
+            "tailored_summary",
+            "tailored_experience",
+            "tailored_projects",
+            "recommended_existing_skills",
+            "missing_skill_suggestions",
+            "improvement_notes",
+        ]
+
+        for key in required_keys:
+            if key not in result:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Gemini response is missing: {key}",
+                )
+
+        return result
 
     except HTTPException:
         raise
 
-    except Exception as error:
-        print(
-            "Tailor resume error:",
-            error
-        )
+    except Exception as exc:
+        print("Tailor resume error:", exc)
 
         raise HTTPException(
             status_code=500,
-            detail=str(error),
+            detail="Unable to tailor resume.",
         )
