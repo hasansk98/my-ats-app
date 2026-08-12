@@ -68,7 +68,7 @@ export default function LoginPage() {
       const siteUrl =
         process.env.NEXT_PUBLIC_SITE_URL ||
         window.location.origin;
-        console.log("SITE URL:", siteUrl);
+      
 
       const { error: googleError } =
         await supabase.auth.signInWithOAuth({
