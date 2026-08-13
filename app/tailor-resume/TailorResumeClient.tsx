@@ -49,6 +49,11 @@ type TailoredResume = {
 
 type TailorApiResponse = TailoredResume;
 
+const API_URL = (
+  process.env.NEXT_PUBLIC_API_URL ||
+  "https://my-ats-app.onrender.com"
+).replace(/\/$/, "");
+
 export default function TailorResumePage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -65,12 +70,49 @@ export default function TailorResumePage() {
   const [loading, setLoading] = useState(true);
   const [loadingJob, setLoadingJob] = useState(false);
   const [tailoring, setTailoring] = useState(false);
+  const [tailorStatus, setTailorStatus] = useState(
+    "Preparing your resume..."
+  );
   const [saving, setSaving] = useState(false);
 
   const [error, setError] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
 
   const [result, setResult] = useState<TailoredResume | null>(null);
+
+  // --------------------------------------------------
+  // TAILORING PROGRESS UX
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (!tailoring) {
+      setTailorStatus("Preparing your resume...");
+      return;
+    }
+
+    const steps = [
+      "Analyzing job requirements...",
+      "Matching your existing skills...",
+      "Rewriting relevant resume content...",
+      "Checking factual consistency...",
+      "Preparing your tailored version...",
+    ];
+
+    setTailorStatus(steps[0]);
+
+    let index = 1;
+
+    const interval = window.setInterval(() => {
+      if (index < steps.length) {
+        setTailorStatus(steps[index]);
+        index += 1;
+      }
+    }, 1800);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [tailoring]);
 
   // --------------------------------------------------
   // LOAD RESUMES
@@ -238,7 +280,7 @@ export default function TailorResumePage() {
 
     try {
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/tailor-resume`,
+        `${API_URL}/tailor-resume`,
         {
           method: "POST",
 
@@ -668,9 +710,20 @@ setResult(data as TailoredResume);
                 className="mt-6 w-full rounded-xl bg-indigo-600 py-4 font-semibold transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {tailoring
-                  ? "AI is tailoring your resume..."
+                  ? tailorStatus
                   : "Tailor Resume"}
               </button>
+
+              {tailoring && (
+                <div className="mt-4 rounded-xl border border-indigo-800/50 bg-indigo-950/20 p-4">
+                  <p className="text-sm text-indigo-300">
+                    AI tailoring usually takes a few seconds.
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">
+                    If the free backend was idle, the first request may take longer while the service wakes up.
+                  </p>
+                </div>
+              )}
 
               <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950 p-4">
                 <p className="text-xs leading-5 text-slate-500">

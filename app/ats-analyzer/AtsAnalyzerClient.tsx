@@ -261,6 +261,11 @@ const SKILL_GROUPS: Record<string, string[]> = {
   scrum: ["scrum"],
 };
 
+const API_URL = (
+  process.env.NEXT_PUBLIC_API_URL ||
+  "https://my-ats-app.onrender.com"
+).replace(/\/$/, "");
+
 export default function ATSAnalyzerPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -283,8 +288,45 @@ export default function ATSAnalyzerPage() {
   const [loading, setLoading] = useState(true);
   const [loadingJob, setLoadingJob] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [analysisStatus, setAnalysisStatus] = useState(
+    "Preparing analysis..."
+  );
 
   const [error, setError] = useState("");
+
+  // --------------------------------------------------
+  // ANALYSIS PROGRESS UX
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (!analyzing) {
+      setAnalysisStatus("Preparing analysis...");
+      return;
+    }
+
+    const steps = [
+      "Checking AI service...",
+      "Comparing resume skills with the job...",
+      "Calculating semantic similarity...",
+      "Building your ATS score...",
+      "Finalizing recommendations...",
+    ];
+
+    setAnalysisStatus(steps[0]);
+
+    let index = 1;
+
+    const interval = window.setInterval(() => {
+      if (index < steps.length) {
+        setAnalysisStatus(steps[index]);
+        index += 1;
+      }
+    }, 1500);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [analyzing]);
 
   // --------------------------------------------------
   // LOAD SAVED RESUMES
@@ -630,7 +672,7 @@ export default function ATSAnalyzerPage() {
     jd: string
   ) {
     const response = await fetch(
-      `${process.env.NEXT_PUBLIC_API_URL}/semantic-match`,
+      `${API_URL}/semantic-match`,
       {
         method: "POST",
 
@@ -904,7 +946,7 @@ export default function ATSAnalyzerPage() {
       console.error(err);
 
       setError(
-        "Semantic ATS backend is unavailable. Make sure FastAPI is running on port 8000."
+        "Unable to connect to the semantic ATS backend. Please try again in a moment."
       );
     } finally {
       setAnalyzing(false);
@@ -1084,9 +1126,20 @@ export default function ATSAnalyzerPage() {
                 className="mt-6 w-full rounded-xl bg-indigo-600 py-4 font-semibold transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {analyzing
-                  ? "Running AI analysis..."
+                  ? analysisStatus
                   : "Analyze Resume"}
               </button>
+
+              {analyzing && (
+                <div className="mt-4 rounded-xl border border-indigo-800/50 bg-indigo-950/20 p-4">
+                  <p className="text-sm text-indigo-300">
+                    Please keep this page open while the analysis runs.
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">
+                    If the free AI service was idle, the first request can take longer while it wakes up.
+                  </p>
+                </div>
+              )}
             </section>
 
             {/* RESULTS */}
