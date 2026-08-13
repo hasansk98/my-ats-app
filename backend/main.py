@@ -1,15 +1,20 @@
 import os
-import json
 import re
+import time
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from google import genai
+from google.genai import types
 
+
+# --------------------------------------------------
+# ENV
+# --------------------------------------------------
 
 load_dotenv()
 
@@ -18,11 +23,18 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is missing.")
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(
+    api_key=GEMINI_API_KEY
+)
+
+
+# --------------------------------------------------
+# FASTAPI
+# --------------------------------------------------
 
 app = FastAPI(
     title="ResumeAI Backend",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -38,6 +50,10 @@ app.add_middleware(
 )
 
 
+# --------------------------------------------------
+# REQUEST MODELS
+# --------------------------------------------------
+
 class SemanticMatchRequest(BaseModel):
     resume_text: str
     job_description: str
@@ -50,18 +66,116 @@ class TailorResumeRequest(BaseModel):
     company_name: str | None = None
 
 
+# --------------------------------------------------
+# GEMINI RESPONSE MODELS
+# --------------------------------------------------
+
+class TailoredExperience(BaseModel):
+    company: str
+    role: str
+    startDate: str
+    endDate: str
+    description: str
+
+
+class TailoredProject(BaseModel):
+    name: str
+    description: str
+    technologies: str
+
+
+class TailoredResumeResponse(BaseModel):
+    tailored_summary: str
+
+    tailored_experience: list[TailoredExperience] = Field(
+        default_factory=list
+    )
+
+    tailored_projects: list[TailoredProject] = Field(
+        default_factory=list
+    )
+
+    recommended_existing_skills: list[str] = Field(
+        default_factory=list
+    )
+
+    missing_skill_suggestions: list[str] = Field(
+        default_factory=list
+    )
+
+    improvement_notes: list[str] = Field(
+        default_factory=list
+    )
+
+
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
+
 def clean_text(text: str) -> str:
     text = text.lower()
-    text = re.sub(r"[^\w\s+#.-]", " ", text)
-    text = re.sub(r"\s+", " ", text)
+
+    text = re.sub(
+        r"[^\w\s+#.-]",
+        " ",
+        text,
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
     return text.strip()
 
+
+def clean_resume_for_ai(
+    resume: dict
+) -> dict:
+    """
+    Send only resume fields that are useful for tailoring.
+
+    This reduces prompt size and avoids sending unnecessary
+    database/internal fields to Gemini.
+    """
+
+    allowed_fields = [
+        "full_name",
+        "summary",
+        "skills",
+        "education",
+        "experience",
+        "projects",
+        "certifications",
+    ]
+
+    cleaned_resume = {}
+
+    for field in allowed_fields:
+        value = resume.get(field)
+
+        if value not in [
+            None,
+            "",
+            [],
+            {},
+        ]:
+            cleaned_resume[field] = value
+
+    return cleaned_resume
+
+
+# --------------------------------------------------
+# BASIC ROUTES
+# --------------------------------------------------
 
 @app.get("/")
 def root():
     return {
         "status": "ok",
         "message": "ResumeAI backend is running",
+        "version": "1.1.0",
     }
 
 
@@ -72,11 +186,24 @@ def health():
     }
 
 
+# --------------------------------------------------
+# SEMANTIC MATCH
+# --------------------------------------------------
+
 @app.post("/semantic-match")
-def semantic_match(request: SemanticMatchRequest):
+def semantic_match(
+    request: SemanticMatchRequest
+):
+    started_at = time.perf_counter()
+
     try:
-        resume_text = clean_text(request.resume_text)
-        job_description = clean_text(request.job_description)
+        resume_text = clean_text(
+            request.resume_text
+        )
+
+        job_description = clean_text(
+            request.job_description
+        )
 
         if not resume_text:
             raise HTTPException(
@@ -108,24 +235,47 @@ def semantic_match(request: SemanticMatchRequest):
             vectors[1:2],
         )[0][0]
 
-        score = round(float(similarity) * 100)
+        score = round(
+            float(similarity) * 100
+        )
 
-        score = max(0, min(score, 100))
+        score = max(
+            0,
+            min(score, 100),
+        )
 
         if score >= 75:
             level = "Strong Match"
+
         elif score >= 50:
             level = "Good Match"
+
         elif score >= 30:
             level = "Moderate Match"
+
         else:
             level = "Low Match"
 
+        elapsed = round(
+            time.perf_counter()
+            - started_at,
+            3,
+        )
+
+        print(
+            f"Semantic match completed in "
+            f"{elapsed}s"
+        )
+
         return {
-            "similarity": round(float(similarity), 4),
+            "similarity": round(
+                float(similarity),
+                4,
+            ),
             "semantic_score": score,
             "level": level,
-            "method": "TF-IDF cosine similarity",
+            "method":
+                "TF-IDF cosine similarity",
         }
 
     except HTTPException:
@@ -136,106 +286,133 @@ def semantic_match(request: SemanticMatchRequest):
             "similarity": 0,
             "semantic_score": 0,
             "level": "Low Match",
-            "method": "TF-IDF cosine similarity",
+            "method":
+                "TF-IDF cosine similarity",
         }
 
     except Exception as exc:
-        print("Semantic match error:", exc)
+        print(
+            "Semantic match error:",
+            exc,
+        )
 
         raise HTTPException(
             status_code=500,
-            detail="Unable to calculate semantic match.",
+            detail=
+                "Unable to calculate semantic match.",
         )
 
 
+# --------------------------------------------------
+# TAILOR RESUME
+# --------------------------------------------------
+
 @app.post("/tailor-resume")
-def tailor_resume(request: TailorResumeRequest):
+def tailor_resume(
+    request: TailorResumeRequest
+):
+    request_started = time.perf_counter()
+
     try:
-        if not request.job_description.strip():
+        job_description = (
+            request.job_description
+            .strip()
+        )
+
+        if not job_description:
             raise HTTPException(
                 status_code=400,
-                detail="Job description is required.",
+                detail=
+                    "Job description is required.",
             )
 
-        resume = request.resume
+        cleaned_resume = (
+            clean_resume_for_ai(
+                request.resume
+            )
+        )
+
+        if not cleaned_resume:
+            raise HTTPException(
+                status_code=400,
+                detail=
+                    "Resume content is required.",
+            )
+
+        # Prevent extremely large job descriptions
+        # from unnecessarily increasing model latency.
+        job_description = (
+            job_description[:12000]
+        )
 
         prompt = f"""
-You are an expert resume tailoring assistant.
+Tailor the resume below for the target job.
 
-Your job is to improve an existing resume for a specific job description.
+TRUTHFULNESS RULES:
+- Use only facts already present in the resume.
+- Never invent employers, roles, dates, education,
+  certifications, projects, skills, technologies,
+  metrics, numbers or achievements.
+- Preserve factual company names, roles, dates,
+  project names and technologies.
+- Missing requirements belong only in
+  missing_skill_suggestions.
+- Rewrite only for clarity, relevance, ATS wording
+  and stronger professional language.
+- Keep all output concise.
+- Summary: maximum 90 words.
+- Each experience description: maximum 90 words.
+- Each project description: maximum 80 words.
+- improvement_notes: maximum 5 short items.
+- recommended_existing_skills: maximum 12 items.
+- missing_skill_suggestions: maximum 12 items.
 
-CRITICAL TRUTHFULNESS RULES:
-
-1. Do NOT invent employment history.
-2. Do NOT invent company names.
-3. Do NOT invent job titles.
-4. Do NOT invent education.
-5. Do NOT invent degrees.
-6. Do NOT invent certifications.
-7. Do NOT invent projects.
-8. Do NOT invent technologies or tools the candidate has never used.
-9. Do NOT invent skills.
-10. Do NOT invent numbers, percentages, revenue, impact metrics, team sizes,
-    performance gains, customer counts, or achievements.
-11. Do NOT claim the candidate has experience they do not have.
-12. Missing job requirements must only appear under
-    "missing_skill_suggestions".
-13. You may rewrite existing experience and project descriptions to improve
-    clarity, ATS wording, action verbs, and relevance.
-14. Preserve all factual dates, employers, roles, project names, and technologies.
-15. Keep the output concise and professional.
-
-JOB TITLE:
+TARGET JOB TITLE:
 {request.job_title or "Not provided"}
 
-COMPANY:
+TARGET COMPANY:
 {request.company_name or "Not provided"}
 
 JOB DESCRIPTION:
-{request.job_description}
+{job_description}
 
-CURRENT RESUME JSON:
-{json.dumps(resume, ensure_ascii=False)}
-
-Return ONLY valid JSON.
-
-Do not use markdown fences.
-
-Return exactly this structure:
-
-{{
-  "tailored_summary": "string",
-  "tailored_experience": [
-    {{
-      "company": "string",
-      "role": "string",
-      "startDate": "string",
-      "endDate": "string",
-      "description": "string"
-    }}
-  ],
-  "tailored_projects": [
-    {{
-      "name": "string",
-      "description": "string",
-      "technologies": "string"
-    }}
-  ],
-  "recommended_existing_skills": [
-    "string"
-  ],
-  "missing_skill_suggestions": [
-    "string"
-  ],
-  "improvement_notes": [
-    "string"
-  ]
-}}
+RESUME:
+{cleaned_resume}
 """
 
-        response = gemini_client.models.generate_content(
-            model="gemini-3.6-flash",
-            contents=prompt,
+        gemini_started = (
+            time.perf_counter()
+        )
+
+        response = (
+            gemini_client
+            .models
+            .generate_content(
+                model="gemini-3.6-flash",
+                contents=prompt,
+
+                config=
+                    types.GenerateContentConfig(
+                        response_mime_type=
+                            "application/json",
+
+                        response_schema=
+                            TailoredResumeResponse,
+
+                        max_output_tokens=1800,
+                    ),
+            )
+        )
+
+        gemini_elapsed = round(
+            time.perf_counter()
+            - gemini_started,
+            3,
+        )
+
+        print(
+            f"Gemini generation completed "
+            f"in {gemini_elapsed}s"
         )
 
         raw_text = response.text
@@ -243,60 +420,59 @@ Return exactly this structure:
         if not raw_text:
             raise HTTPException(
                 status_code=500,
-                detail="Gemini returned an empty response.",
+                detail=
+                    "Gemini returned an empty response.",
             )
 
-        cleaned = raw_text.strip()
-
-        if cleaned.startswith("```json"):
-            cleaned = cleaned[7:]
-
-        elif cleaned.startswith("```"):
-            cleaned = cleaned[3:]
-
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-
-        cleaned = cleaned.strip()
-
         try:
-            result = json.loads(cleaned)
+            result = (
+                TailoredResumeResponse
+                .model_validate_json(
+                    raw_text
+                )
+            )
 
-        except json.JSONDecodeError as exc:
-            print("Gemini raw response:")
-            print(raw_text)
-            print("JSON error:", exc)
+        except Exception as exc:
+            print(
+                "Gemini validation error:",
+                exc,
+            )
+
+            print(
+                "Gemini raw response:",
+                raw_text,
+            )
 
             raise HTTPException(
                 status_code=500,
-                detail="Gemini returned invalid JSON.",
+                detail=
+                    "Gemini returned an invalid structured response.",
             )
 
-        required_keys = [
-            "tailored_summary",
-            "tailored_experience",
-            "tailored_projects",
-            "recommended_existing_skills",
-            "missing_skill_suggestions",
-            "improvement_notes",
-        ]
+        total_elapsed = round(
+            time.perf_counter()
+            - request_started,
+            3,
+        )
 
-        for key in required_keys:
-            if key not in result:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Gemini response is missing: {key}",
-                )
+        print(
+            f"Tailor request completed "
+            f"in {total_elapsed}s"
+        )
 
-        return result
+        return result.model_dump()
 
     except HTTPException:
         raise
 
     except Exception as exc:
-        print("Tailor resume error:", exc)
+        print(
+            "Tailor resume error:",
+            exc,
+        )
 
         raise HTTPException(
             status_code=500,
-            detail="Unable to tailor resume.",
+            detail=
+                "Unable to tailor resume.",
         )
